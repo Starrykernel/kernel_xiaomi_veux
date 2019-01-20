@@ -36,3 +36,5 @@ modules_install:
 
 clean:
 	$(MAKE) -C $(KERNEL_SRC) M=$(M) clean $(KBUILD_OPTIONS)
+
+subdir-ccflags-y := -Os
