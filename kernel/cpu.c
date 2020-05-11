@@ -1377,7 +1377,7 @@ int __freeze_secondary_cpus(int primary, bool suspend)
 			continue;
 
 		if (suspend && pm_wakeup_pending()) {
-			pr_info("Wakeup pending. Abort CPU freeze\n");
+			pr_debug("Wakeup pending. Abort CPU freeze\n");
 			error = -EBUSY;
 			break;
 		}
