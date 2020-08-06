@@ -1685,10 +1685,9 @@ static inline bool may_mandlock(void)
 }
 #endif
 
-static int path_umount(struct path *path, int flags)
+static int can_umount(const struct path *path, int flags)
 {
-	struct mount *mnt;
-	int retval;
+	struct mount *mnt = real_mount(path->mnt);
 
 	if (flags & ~(MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW))
 		return -EINVAL;
@@ -1705,7 +1704,6 @@ static int path_umount(struct path *path, int flags)
 	return 0;
 }
 
-// caller is responsible for flags being sane
 int path_umount(struct path *path, int flags)
 {
 	struct mount *mnt = real_mount(path->mnt);
@@ -1719,36 +1717,6 @@ int path_umount(struct path *path, int flags)
 	dput(path->dentry);
 	mntput_no_expire(mnt);
 	return ret;
-}
-
-int ksys_umount(char __user *name, int flags)
-{
-	int lookup_flags = LOOKUP_MOUNTPOINT;
-	struct path path;
-	int ret;
-
-	// basic validity checks done first
-	if (flags & ~(MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW))
-		return -EINVAL;
-
-	mnt = real_mount(path->mnt);
-	retval = -EINVAL;
-	if (path->dentry != path->mnt->mnt_root)
-		goto dput_and_out;
-	if (!check_mnt(mnt))
-		goto dput_and_out;
-	if (mnt->mnt.mnt_flags & MNT_LOCKED) /* Check optimistically */
-		goto dput_and_out;
-	retval = -EPERM;
-	if (flags & MNT_FORCE && !capable(CAP_SYS_ADMIN))
-		goto dput_and_out;
-
-	retval = do_umount(mnt, flags);
-dput_and_out:
-	/* we mustn't call path_put() as that would clear mnt_expiry_mark */
-	dput(path->dentry);
-	mntput_no_expire(mnt);
-	return retval;
 }
 
 int ksys_umount(char __user *name, int flags)
