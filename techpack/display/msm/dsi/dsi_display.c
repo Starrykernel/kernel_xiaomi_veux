@@ -21,6 +21,7 @@
 #include "dsi_pwr.h"
 #include "sde_dbg.h"
 #include "dsi_parser.h"
+#include "mi_dsi_display.h"
 
 #ifdef CONFIG_DRM_SDE_EXPO
 #include "sde_expo_dim_layer.h"
