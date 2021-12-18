@@ -437,7 +437,7 @@ int blk_queue_enter(struct request_queue *q, blk_mq_req_flags_t flags)
 		 */
 		smp_rmb();
 
-		wait_event(q->mq_freeze_wq,
+		wait_event_interruptible(q->mq_freeze_wq,
 			   (!q->mq_freeze_depth &&
 			    (pm || (blk_pm_request_resume(q),
 				    !blk_queue_pm_only(q)))) ||
