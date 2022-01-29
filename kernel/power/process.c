@@ -30,6 +30,8 @@ unsigned int __read_mostly freeze_timeout_msecs = 5 * MSEC_PER_SEC;
 
 #define MIN(X, Y) (((X) < (Y)) ? (X) : (Y))
 
+#define MIN(X, Y) (((X) < (Y)) ? (X) : (Y))
+
 static int try_to_freeze_tasks(bool user_only)
 {
 	struct task_struct *g, *p;
