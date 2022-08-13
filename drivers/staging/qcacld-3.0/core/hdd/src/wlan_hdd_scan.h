@@ -156,6 +156,17 @@ wlan_hdd_extscan_config_policy[EXTSCAN_PARAM_MAX + 1];
 extern const struct nla_policy
 wlan_hdd_pno_config_policy[QCA_WLAN_VENDOR_ATTR_PNO_MAX + 1];
 
+#ifdef CFG_SUPPORT_SCAN_EXT_FLAG
+/**
+ * hdd_scan_event_callback() - scan done callback function called after
+ * scan is finished
+ * @netdev: net_device ptr
+ *
+ * Return: none
+ */
+void hdd_scan_event_callback(struct net_device *netdev);
+#endif
+
 #define FEATURE_EXTSCAN_VENDOR_COMMANDS					       \
 {									       \
 	.info.vendor_id = QCA_NL80211_VENDOR_ID,			       \
