@@ -2107,7 +2107,7 @@ static int map_files_get_link(struct dentry *dentry, struct path *path)
  	if (vma) {
         	if (vma->vm_file) {
             		if (strstr(vma->vm_file->f_path.dentry->d_name.name, "lineage")) { 
-            		rc = kern_path("/dev/ashmem (deleted)", LOOKUP_FOLLOW, path);
+            		rc = kern_path("/system/framework/framework-res.apk", LOOKUP_FOLLOW, path);
         	} else {
 			*path = vma->vm_file->f_path;
 			path_get(path);
