@@ -281,6 +281,10 @@ struct dsi_panel {
 	enum dsi_doze_type doze_status;
 	u32 doze_hbm_threshold;
 
+#ifdef CONFIG_DRM_SDE_EXPO
+	bool dimlayer_exposure;
+#endif
+
 	u8 dsi_refresh_flag;
 };
 
