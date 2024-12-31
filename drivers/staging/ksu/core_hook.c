@@ -647,6 +647,9 @@ int ksu_handle_setuid(struct cred *new, const struct cred *old)
 	// try umount ksu temp path
 	try_umount("/debug_ramdisk", false, MNT_DETACH);
 
+	// try umount hosts file
+	try_umount("/system/etc/hosts", false, MNT_DETACH);
+
 	return 0;
 }
 
