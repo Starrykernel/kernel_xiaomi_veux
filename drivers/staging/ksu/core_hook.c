@@ -650,6 +650,12 @@ int ksu_handle_setuid(struct cred *new, const struct cred *old)
 	// try umount hosts file
 	try_umount("/system/etc/hosts", false, MNT_DETACH);
 
+	// try umount misc configs
+	try_umount("/system/etc", false, MNT_DETACH);
+	try_umount("/product/etc", false, MNT_DETACH);
+	try_umount("/system/etc/sysconfig", false, MNT_DETACH);
+	try_umount("/product/etc/sysconfig", false, MNT_DETACH);
+
 	return 0;
 }
 
