@@ -285,6 +285,8 @@ static ssize_t aw2016_breath_store(struct device *dev,
 	ret = kstrtoul(buf, 10, &blinking);
 	if (ret)
 		return ret;
+	if (led->blinking == (int)blinking)
+		return ret;
 	led->blinking = (int)blinking;
 	schedule_work(&led->blink_work);
 
