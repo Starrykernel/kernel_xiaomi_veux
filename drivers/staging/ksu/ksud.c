@@ -65,6 +65,11 @@ bool ksu_execveat_hook __read_mostly = true;
 bool ksu_input_hook __read_mostly = true;
 
 
+#ifdef CONFIG_KSU_SUSFS_SUS_SU
+bool ksu_devpts_hook = false;
+bool susfs_is_sus_su_ready = false;
+#endif
+
 u32 ksu_devpts_sid;
 
 void on_post_fs_data(void)
@@ -646,6 +651,10 @@ static void stop_execve_hook()
 #else
 	ksu_execveat_hook = false;
 	pr_info("stop execve_hook\n");
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_SU
+	susfs_is_sus_su_ready = true;
+	pr_info("susfs: sus_su is ready\n");
 #endif
 }
 
