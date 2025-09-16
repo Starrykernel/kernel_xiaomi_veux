@@ -83,6 +83,8 @@ struct qmp {
 	struct clk_hw qdss_clk;
 	struct genpd_onecell_data pd_data;
 	struct qmp_cooling_device *cooling_devs;
+
+	int irq;
 };
 
 struct qmp_pd {
@@ -149,6 +151,8 @@ static int qmp_open(struct qmp *qmp)
 	writel(QMP_STATE_UP, qmp->msgram + QMP_DESC_MCORE_LINK_STATE);
 
 	qmp_kick(qmp);
+
+	enable_irq(qmp->irq);
 
 	ret = wait_event_timeout(qmp->event, qmp_link_acked(qmp), HZ);
 	if (!ret) {
@@ -546,13 +550,14 @@ static int qmp_probe(struct platform_device *pdev)
 	}
 
 	irq = platform_get_irq(pdev, 0);
-	ret = devm_request_irq(&pdev->dev, irq, qmp_intr, 0,
+	ret = devm_request_irq(&pdev->dev, irq, qmp_intr, IRQF_NO_AUTOEN,
 			       "aoss-qmp", qmp);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "failed to request interrupt\n");
 		goto err_free_mbox;
 	}
 
+	qmp->irq = irq;
 	ret = qmp_open(qmp);
 	if (ret < 0)
 		goto err_free_mbox;
