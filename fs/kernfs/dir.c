@@ -760,7 +760,7 @@ struct kernfs_node *kernfs_find_and_get_node_by_ino(struct kernfs_root *root,
 	 * before 'count'. So if 'count' is uptodate, 'ino' should be uptodate,
 	 * hence we can use 'ino' to filter stale node.
 	 */
-	if (kn->id.ino != ino)
+	if ((u32)kn->id != ino)
 		goto out;
 	rcu_read_unlock();
 

@@ -101,36 +101,6 @@ int flow_dissector_bpf_prog_attach_check(struct net *net,
 }
 #endif /* CONFIG_BPF_SYSCALL */
 
-int netns_bpf_prog_detach(const union bpf_attr *attr)
-{
-	enum netns_bpf_attach_type type;
-	int ret;
-
-	type = to_netns_bpf_attach_type(attr->attach_type);
-	if (type < 0)
-		return -EINVAL;
-
-	mutex_lock(&netns_bpf_mutex);
-	ret = __netns_bpf_prog_detach(current->nsproxy->net_ns, type);
-	mutex_unlock(&netns_bpf_mutex);
-
-	return ret;
-}
-
-static void __net_exit netns_bpf_pernet_pre_exit(struct net *net)
-{
-	enum netns_bpf_attach_type type;
-
-	mutex_lock(&netns_bpf_mutex);
-	for (type = 0; type < MAX_NETNS_BPF_ATTACH_TYPE; type++)
-		__netns_bpf_prog_detach(net, type);
-	mutex_unlock(&netns_bpf_mutex);
-}
-
-static struct pernet_operations netns_bpf_pernet_ops __net_initdata = {
-	.pre_exit = netns_bpf_pernet_pre_exit,
-};
-
 /**
  * __skb_flow_get_ports - extract the upper layer ports and return them
  * @skb: sk_buff to extract the ports from
@@ -1442,8 +1412,7 @@ static inline size_t flow_keys_hash_length(const struct flow_keys *flow)
 	/* flow.addrs MUST be the last member in struct flow_keys because
 	 * different L3 protocols have different address length
 	 */
-	BUILD_BUG_ON(offsetof(typeof(*flow), addrs) !=
-		     sizeof(*flow) - sizeof(flow->addrs));
+	BUILD_BUG_ON((sizeof(*flow) - FLOW_KEYS_HASH_OFFSET) % sizeof(u32));
 
 	switch (flow->control.addr_type) {
 	case FLOW_DISSECTOR_KEY_IPV4_ADDRS:

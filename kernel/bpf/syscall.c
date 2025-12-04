@@ -316,12 +316,12 @@ static void *__bpf_map_area_alloc(u64 size, int numa_node, bool mmapable)
 					   flags, __builtin_return_address(0));
 }
 
-void *bpf_map_area_alloc(size_t size, int numa_node)
+void *bpf_map_area_alloc(u64 size, int numa_node)
 {
 	return __bpf_map_area_alloc(size, numa_node, false);
 }
 
-void *bpf_map_area_mmapable_alloc(size_t size, int numa_node)
+void *bpf_map_area_mmapable_alloc(u64 size, int numa_node)
 {
 	return __bpf_map_area_alloc(size, numa_node, true);
 }
@@ -3751,7 +3751,8 @@ static int bpf_btf_get_info_by_fd(struct file *file,
 	return btf_get_info_by_fd(btf, attr, uattr);
 }
 
-static int bpf_link_get_info_by_fd(struct bpf_link *link,
+static int bpf_link_get_info_by_fd(struct file *file,
+				  struct bpf_link *link,
 				  const union bpf_attr *attr,
 				  union bpf_attr __user *uattr)
 {

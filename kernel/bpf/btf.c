@@ -1105,8 +1105,8 @@ static void *btf_show_obj_safe(struct btf_show *show,
 		size_left = btf_show_obj_size_left(show, data);
 		if (size_left > BTF_SHOW_OBJ_SAFE_SIZE)
 			size_left = BTF_SHOW_OBJ_SAFE_SIZE;
-		show->state.status = copy_from_kernel_nofault(show->obj.safe,
-							      data, size_left);
+		show->state.status = probe_kernel_read(show->obj.safe,
+					  data, size_left);
 		if (!show->state.status) {
 			show->obj.data = data;
 			safe = show->obj.safe;
