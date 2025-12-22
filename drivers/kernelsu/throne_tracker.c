@@ -6,17 +6,10 @@
 #include <linux/types.h>
 #include <linux/version.h>
 
-#include "allowlist.h"
-#include "klog.h" // IWYU pragma: keep
-#include "ksu.h"
-#include "manager.h"
-#include "throne_tracker.h"
-#include "kernel_compat.h"
-
 #include <linux/kthread.h>
 #include <linux/sched.h>
 
-uid_t ksu_manager_uid = KSU_INVALID_UID;
+uid_t ksu_manager_appid = KSU_INVALID_APPID;
 
 static struct task_struct *throne_thread;
 #define SYSTEM_PACKAGES_LIST_PATH "/data/system/packages.list"
@@ -90,7 +83,7 @@ static void crown_manager(const char *apk, struct list_head *uid_data)
 	list_for_each_entry (np, list, list) {
 		if (strncmp(np->package, pkg, KSU_MAX_PACKAGE_NAME) == 0) {
 			pr_info("Crowning manager: %s(uid=%d)\n", pkg, np->uid);
-			ksu_set_manager_uid(np->uid);
+			ksu_set_manager_appid(np->uid);
 			break;
 		}
 	}
@@ -317,7 +310,7 @@ static bool is_uid_exist(uid_t uid, char *package, void *data)
 
 	bool exist = false;
 	list_for_each_entry (np, list, list) {
-		if (np->uid == uid % 100000 &&
+		if (np->uid == uid % PER_USER_RANGE &&
 		    strncmp(np->package, package, KSU_MAX_PACKAGE_NAME) == 0) {
 			exist = true;
 			break;
@@ -405,17 +398,14 @@ static void throne_tracker_fn(bool prune_only)
 	// first, check if manager_uid exist!
 	bool manager_exist = false;
 	list_for_each_entry (np, &uid_list, list) {
-		// if manager is installed in work profile, the uid in packages.list is still equals main profile
-		// don't delete it in this case!
-		int manager_uid = ksu_get_manager_uid() % 100000;
-		if (np->uid == manager_uid) {
+		if (np->uid == ksu_get_manager_appid()) {
 			manager_exist = true;
 			break;
 		}
 	}
 
 	if (!manager_exist) {
-		if (ksu_is_manager_uid_valid()) {
+		if (ksu_is_manager_appid_valid()) {
 			pr_info("manager is uninstalled, invalidate it!\n");
 			ksu_invalidate_manager_uid();
 			goto prune;
@@ -442,6 +432,10 @@ static int throne_tracker_thread(void *data)
 	bool prune_only = (bool)data;
 
 	pr_info("throne_tracker: pid: %d started\n", current->pid);
+
+	// this is normally not needed, but it wont hurt
+	kthread_escape();
+
 	throne_tracker_fn(prune_only);
 	throne_thread = NULL;
 	smp_mb();

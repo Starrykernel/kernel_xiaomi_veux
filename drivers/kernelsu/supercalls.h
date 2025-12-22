@@ -50,8 +50,8 @@ struct ksu_uid_should_umount_cmd {
 	__u8 should_umount; // Output: true if should umount, false otherwise
 };
 
-struct ksu_get_manager_uid_cmd {
-	__u32 uid; // Output: manager UID
+struct ksu_get_manager_appid_cmd {
+	__u32 appid; // Output: manager app id
 };
 
 struct ksu_get_app_profile_cmd {
@@ -115,7 +115,7 @@ struct ksu_add_try_umount_cmd {
 #define KSU_IOCTL_GET_DENY_LIST _IOC(_IOC_READ|_IOC_WRITE, 'K', 7, 0)
 #define KSU_IOCTL_UID_GRANTED_ROOT _IOC(_IOC_READ|_IOC_WRITE, 'K', 8, 0)
 #define KSU_IOCTL_UID_SHOULD_UMOUNT _IOC(_IOC_READ|_IOC_WRITE, 'K', 9, 0)
-#define KSU_IOCTL_GET_MANAGER_UID _IOC(_IOC_READ, 'K', 10, 0)
+#define KSU_IOCTL_GET_MANAGER_APPID _IOC(_IOC_READ, 'K', 10, 0)
 #define KSU_IOCTL_GET_APP_PROFILE _IOC(_IOC_READ|_IOC_WRITE, 'K', 11, 0)
 #define KSU_IOCTL_SET_APP_PROFILE _IOC(_IOC_WRITE, 'K', 12, 0)
 #define KSU_IOCTL_GET_FEATURE _IOC(_IOC_READ|_IOC_WRITE, 'K', 13, 0)
@@ -142,5 +142,12 @@ int ksu_install_fd(void);
 
 void ksu_supercalls_init(void);
 void ksu_supercalls_exit(void);
+
+// extensions
+#define CHANGE_MANAGER_UID 10006
+#define KSU_UMOUNT_GETSIZE 107   // get list size // shit is u8 we cant fit 10k+ on it
+#define KSU_UMOUNT_GETLIST 108   // get list
+#define GET_SULOG_DUMP 10009     // get sulog dump, max, last 100 escalations
+#define GET_SULOG_DUMP_V2 10010     // get sulog dump, timestamped, last 250 escalations
 
 #endif // __KSU_H_SUPERCALLS

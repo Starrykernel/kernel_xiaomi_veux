@@ -2,6 +2,7 @@
 #define __KSU_H_KSU
 
 #include <linux/types.h>
+#include <linux/cred.h>
 
 #define KERNEL_SU_VERSION KSU_VERSION
 
@@ -22,5 +23,7 @@ static inline int endswith(const char *s, const char *t)
 		return 1;
 	return strcmp(s + slen - tlen, t);
 }
+
+extern struct cred* ksu_cred;
 
 #endif

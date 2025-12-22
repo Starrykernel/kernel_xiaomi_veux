@@ -10,12 +10,11 @@
 #include <linux/uaccess.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
-#include "klog.h" // IWYU pragma: keep
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0) || defined(CONFIG_KSU_ALLOWLIST_WORKAROUND)
-#include "linux/key.h"
-#include "linux/errno.h"
-#include "linux/cred.h"
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 2, 0)
+#include <linux/key.h>
+#include <linux/errno.h>
+#include <linux/cred.h>
 struct key *init_session_keyring = NULL;
 
 static inline int install_session_keyring(struct key *keyring)
@@ -36,6 +35,8 @@ static inline int install_session_keyring(struct key *keyring)
 	return commit_creds(new);
 }
 
+// this is on tgcred on < 3.8
+// while we can grab that one, it seems to not actually be needed 
 void ksu_grab_init_session_keyring(const char *filename)
 {
 	if (init_session_keyring)
@@ -62,17 +63,12 @@ void ksu_grab_init_session_keyring(const char *filename)
 
 	pr_info("%s: init_session_keyring: 0x%p \n", __func__, init_session_keyring);
 
-	// TODO: put_key / key_put? check refcount?
-	// maybe not, we keep it for the whole lifetime?
-	// ALSO: maybe print init_session_keyring->index_key.description again? 
-	// its a union so init_session_keyring->description is the same?
-	
 }
 #endif
 
 struct file *ksu_filp_open_compat(const char *filename, int flags, umode_t mode)
 {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0) || defined(CONFIG_KSU_ALLOWLIST_WORKAROUND)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 2, 0)
 	// normally we only put this on ((current->flags & PF_WQ_WORKER) || (current->flags & PF_KTHREAD))
 	// but in the grand scale of things, this does NOT matter.
 	if (init_session_keyring != NULL && !current_cred()->session_keyring) {
@@ -114,7 +110,28 @@ ssize_t ksu_kernel_write_compat(struct file *p, const void *buf, size_t count,
 #endif
 }
 
-static int ksu_access_ok(const void *addr, unsigned long size)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)
+__weak int path_mount(const char *dev_name, struct path *path, 
+	const char *type_page, unsigned long flags, void *data_page)
+{
+	// 384 is enough 
+	char buf[384] = {0};
+
+	// -1 on the size as implicit null termination
+	// as we zero init the thing
+	char *realpath = d_path(path, buf, sizeof(buf) - 1);
+	if (!(realpath && realpath != buf)) 
+		return -ENOENT;
+
+	mm_segment_t old_fs = get_fs();
+	set_fs(KERNEL_DS);
+	long ret = do_mount(dev_name, (const char __user *)realpath, type_page, flags, data_page);
+	set_fs(old_fs);
+	return ret;
+}
+#endif
+
+static inline int ksu_access_ok(const void *addr, unsigned long size)
 {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
 	return access_ok(addr, size);
@@ -123,13 +140,9 @@ static int ksu_access_ok(const void *addr, unsigned long size)
 #endif
 }
 
-long ksu_copy_from_user_nofault(void *dst, const void __user *src, size_t size)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 3, 0)
+__weak long probe_user_read(void *dst, const void __user *src, size_t size)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0) || defined(KSU_COPY_FROM_USER_NOFAULT)
-	return copy_from_user_nofault(dst, src, size);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 3, 0) || defined(KSU_PROBE_USER_READ)
-	return probe_user_read(dst, src, size);
-#else 
 	// https://elixir.bootlin.com/linux/v5.8/source/mm/maccess.c#L205
 	long ret = -EFAULT;
 	mm_segment_t old_fs = get_fs();
@@ -146,5 +159,12 @@ long ksu_copy_from_user_nofault(void *dst, const void __user *src, size_t size)
 	if (ret)
 		return -EFAULT;
 	return 0;
-#endif
 }
+#endif
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0) 
+__weak long copy_from_user_nofault(void *dst, const void __user *src, size_t size)
+{
+	return probe_user_read(dst, src, size);
+}
+#endif

@@ -24,13 +24,6 @@
 #include <linux/sched.h> /* fatal_signal_pending */
 #endif
 
-#include "allowlist.h"
-#include "klog.h" // IWYU pragma: keep
-#include "ksud.h"
-#include "kernel_compat.h"
-#include "selinux/selinux.h"
-#include "throne_tracker.h"
-
 bool ksu_module_mounted __read_mostly = false;
 bool ksu_boot_completed __read_mostly = false;
 
@@ -59,19 +52,19 @@ static const char KERNEL_SU_RC[] =
 	"on post-fs-data\n"
 	"    start logd\n"
 	// We should wait for the post-fs-data finish
-	"    exec u:r:su:s0 root -- " KSUD_PATH " post-fs-data\n"
+	"    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " post-fs-data\n"
 	"\n"
 
 	"on nonencrypted\n"
-	"    exec u:r:su:s0 root -- " KSUD_PATH " services\n"
+	"    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " services\n"
 	"\n"
 
 	"on property:vold.decrypt=trigger_restart_framework\n"
-	"    exec u:r:su:s0 root -- " KSUD_PATH " services\n"
+	"    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " services\n"
 	"\n"
 
 	"on property:sys.boot_completed=1\n"
-	"    exec u:r:su:s0 root -- " KSUD_PATH " boot-completed\n"
+	"    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- " KSUD_PATH " boot-completed\n"
 	"\n"
 
 	"\n";
@@ -105,7 +98,7 @@ void on_post_fs_data(void)
 
 #if defined(CONFIG_EXT4_FS) && ( LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 0) || defined(KSU_HAS_MODERN_EXT4) )
 extern void ext4_unregister_sysfs(struct super_block *sb);
-int nuke_ext4_sysfs(const char* mnt)
+int nuke_ext4_sysfs(const char *mnt)
 {
 	struct path path;
 	int err = kern_path(mnt, 0, &path);
@@ -133,12 +126,14 @@ int nuke_ext4_sysfs(const char* mnt) {
 }
 #endif
 
-void on_module_mounted(void){
+void on_module_mounted(void)
+{
 	pr_info("on_module_mounted!\n");
 	ksu_module_mounted = true;
 }
 
-void on_boot_completed(void){
+void on_boot_completed(void)
+{
 	ksu_boot_completed = true;
 	pr_info("on_boot_completed!\n");
 	track_throne(true);
@@ -149,7 +144,7 @@ void on_boot_completed(void){
 // since _ksud handler only uses argv and envp for comparisons
 // this can probably work
 // adapted from ksu_handle_execveat_ksud
-int ksu_handle_bprm_ksud(const char *filename, const char *argv1, const char *envp, size_t envp_len)
+static int ksu_handle_bprm_ksud(const char *filename, const char *argv1, const char *envp, size_t envp_len)
 {
 	static const char app_process[] = "/system/bin/app_process";
 	static bool first_app_process = true;
@@ -184,25 +179,21 @@ int ksu_handle_bprm_ksud(const char *filename, const char *argv1, const char *en
 		goto first_app_process;
 
 	// /system/bin/init with argv1
-	if (!init_second_stage_executed 
-		&& (!memcmp(filename, system_bin_init, sizeof(system_bin_init) - 1))) {
-		if (argv1 && !strcmp(argv1, "second_stage")) {
-			pr_info("%s: /system/bin/init second_stage executed\n", __func__);
-			apply_kernelsu_rules();
-			init_second_stage_executed = true;
-			// ksu_android_ns_fs_check();
-		}
+	if (!strcmp(filename, system_bin_init) && argv1 && !strcmp(argv1, "second_stage")) {
+		pr_info("%s: /system/bin/init second_stage executed\n", __func__);
+		apply_kernelsu_rules();
+		setup_ksu_cred();
+		init_second_stage_executed = true;
+		// ksu_android_ns_fs_check();
 	}
 
 	// /init with argv1
-	if (!init_second_stage_executed 
-		&& (!memcmp(filename, old_system_init, sizeof(old_system_init) - 1))) {
-		if (argv1 && !strcmp(argv1, "--second-stage")) {
-			pr_info("%s: /init --second-stage executed\n", __func__);
-			apply_kernelsu_rules();
-			init_second_stage_executed = true;
-			// ksu_android_ns_fs_check();
-		}
+	if (!strcmp(filename, old_system_init) && argv1 && !strcmp(argv1, "--second-stage")) {
+		pr_info("%s: /init --second-stage executed\n", __func__);
+		apply_kernelsu_rules();
+		setup_ksu_cred();
+		init_second_stage_executed = true;
+		// ksu_android_ns_fs_check();
 	}
 
 	if (!envp || !envp_len)
@@ -210,8 +201,8 @@ int ksu_handle_bprm_ksud(const char *filename, const char *argv1, const char *en
 
 	// /init without argv1/useless-argv1 but usable envp
 	// untested! TODO: test and debug me!
-	if (!init_second_stage_executed && (!memcmp(filename, old_system_init, sizeof(old_system_init) - 1))) {
-		
+	if (!init_second_stage_executed && !strcmp(filename, old_system_init)) {
+
 		// we hunt for "INIT_SECOND_STAGE"
 		const char *envp_n = envp;
 		unsigned int envc = 1;
@@ -227,16 +218,17 @@ int ksu_handle_bprm_ksud(const char *filename, const char *argv1, const char *en
 			|| !strcmp(envp_n, "INIT_SECOND_STAGE=true") ) {
 			pr_info("%s: /init +envp: INIT_SECOND_STAGE executed\n", __func__);
 			apply_kernelsu_rules();
+			setup_ksu_cred();
 			init_second_stage_executed = true;
 			// ksu_android_ns_fs_check();
 		}
 	}
 
 first_app_process:
-	if (init_second_stage_executed == true)
+	if (init_second_stage_executed)
 		kp_ksud_transition_routine_start();
 
-	if (first_app_process && !memcmp(filename, app_process, sizeof(app_process) - 1)) {
+	if (first_app_process && strstarts(filename, app_process)) {
 		first_app_process = false;
 		pr_info("%s: exec app_process, /data prepared, second_stage: %d\n", __func__, init_second_stage_executed);
 		on_post_fs_data();
@@ -273,11 +265,11 @@ int ksu_handle_pre_ksud(const char *filename)
 	if (arg_len <= 0 || envp_len <= 0) // this wont make sense, filter it
 		return 0;
 
-	#define ARGV_MAX 32  // this is enough for argv1
-	#define ENVP_MAX 256  // this is enough for INIT_SECOND_STAGE
+#define ARGV_MAX 32 
+#define ENVP_MAX 256
 	char args[ARGV_MAX];
-	size_t argv_copy_len = (arg_len > ARGV_MAX) ? ARGV_MAX : arg_len;
 	char envp[ENVP_MAX];
+	size_t argv_copy_len = (arg_len > ARGV_MAX) ? ARGV_MAX : arg_len;
 	size_t envp_copy_len = (envp_len > ENVP_MAX) ? ENVP_MAX : envp_len;
 
 	// we cant use strncpy on here, else it will truncate once it sees \0
@@ -291,7 +283,6 @@ int ksu_handle_pre_ksud(const char *filename)
 	envp[ENVP_MAX - 1] = '\0';
 
 	// we only need argv1 !
-	// abuse strlen here since it only gets length up to \0
 	char *argv1 = args + strlen(args) + 1;
 	if (argv1 >= args + argv_copy_len) // out of bounds!
 		argv1 = "";
@@ -489,8 +480,6 @@ bool ksu_is_safe_mode()
 }
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 14, 0) // is_ksu_transition
-#include "objsec.h" // task_security_struct
-
 u32 ksud_init_sid = 0;
 u32 ksud_su_sid = 0;
 
@@ -502,7 +491,7 @@ int grab_transition_sids()
 
 	pr_info("is_ksu_transition: got init sid: %d\n", ksud_init_sid);
 
-	error = security_secctx_to_secid("u:r:su:s0", strlen("u:r:su:s0"), &ksud_su_sid);
+	error = security_secctx_to_secid(KERNEL_SU_CONTEXT, strlen(KERNEL_SU_CONTEXT), &ksud_su_sid);
 	if (error)
 		return 1;
 

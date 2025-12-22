@@ -9,18 +9,16 @@
 #include <linux/sched.h>
 #endif
 #include <linux/seccomp.h>
+#include <linux/slab.h>
 #include <linux/thread_info.h>
 #include <linux/uidgid.h>
 #include <linux/version.h>
 
-#include "allowlist.h"
-#include "app_profile.h"
-#include "klog.h" // IWYU pragma: keep
-#include "selinux/selinux.h"
-#include "sucompat.h"
-#include "kernel_compat.h"
-
+#if LINUX_VERSION_CODE >= KERNEL_VERSION (6, 7, 0)
+static struct group_info root_groups = { .usage = REFCOUNT_INIT(2) };
+#else 
 static struct group_info root_groups = { .usage = ATOMIC_INIT(2) };
+#endif
 
 static void setup_groups(struct root_profile *profile, struct cred *cred)
 {
@@ -68,22 +66,53 @@ static void setup_groups(struct root_profile *profile, struct cred *cred)
 
 void disable_seccomp()
 {
-	assert_spin_locked(&current->sighand->siglock);
+
+// for < 5.9 lets have free_task do it for us (put_seccomp_filter)
+// we risk a double free / double decrement which isn't safe on old kernels
+// I'm not even sure if this thing is needed on newer kernels
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
+	struct task_struct *fake;
+
+	fake = kmalloc(sizeof(*fake), GFP_ATOMIC);
+	if (!fake) {
+		pr_warn("failed to alloc fake task_struct\n");
+		return;
+	}
+#endif
+
+	// Refer to kernel/seccomp.c: seccomp_set_mode_strict
+	// When disabling Seccomp, ensure that current->sighand->siglock is held during the operation.
+	spin_lock_irq(&current->sighand->siglock);
+
 	// disable seccomp
-#if defined(CONFIG_GENERIC_ENTRY) &&                                           \
-	LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+#if defined(CONFIG_GENERIC_ENTRY) && LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
 	clear_syscall_work(SECCOMP);
 #else
 	clear_thread_flag(TIF_SECCOMP);
 #endif
 
-#ifdef CONFIG_SECCOMP
-	current->seccomp.mode = 0;
-	current->seccomp.filter = NULL;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
+	memcpy(fake, current, sizeof(*fake));
 	atomic_set(&current->seccomp.filter_count, 0);
 #endif
+
+	current->seccomp.mode = 0;
+	current->seccomp.filter = NULL;
+
+	spin_unlock_irq(&current->sighand->siglock);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+	// https://github.com/torvalds/linux/commit/bfafe5efa9754ebc991750da0bcca2a6694f3ed3#diff-45eb79a57536d8eccfc1436932f093eb5c0b60d9361c39edb46581ad313e8987R576-R577
+	fake->flags |= PF_EXITING;
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+	// https://github.com/torvalds/linux/commit/0d8315dddd2899f519fe1ca3d4d5cdaf44ea421e#diff-45eb79a57536d8eccfc1436932f093eb5c0b60d9361c39edb46581ad313e8987R556-R558
+	fake->sighand = NULL;
 #endif
+
+	seccomp_filter_release(fake);
+	kfree(fake);
+#endif // 5.9
 }
 
 static void escape_to_root(bool is_kthread)
@@ -134,19 +163,19 @@ static void escape_to_root(bool is_kthread)
 
 	commit_creds(cred);
 
-#ifdef CONFIG_SECCOMP
 	if (!!!current->seccomp.mode)
 		goto setup_selinux;
-#endif
 
-	// Refer to kernel/seccomp.c: seccomp_set_mode_strict
-	// When disabling Seccomp, ensure that current->sighand->siglock is held during the operation.
-	spin_lock_irq(&current->sighand->siglock);
 	disable_seccomp();
-	spin_unlock_irq(&current->sighand->siglock);
 
 setup_selinux:
 	setup_selinux(profile->selinux_domain);
+	
+	setup_mount_ns(profile->namespaces);
+}
+
+void escape_to_root_for_init(void) {
+	setup_selinux(KERNEL_SU_CONTEXT);
 }
 
 void escape_with_root_profile(void)

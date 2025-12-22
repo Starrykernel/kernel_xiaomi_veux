@@ -14,53 +14,10 @@
 #include <linux/sched.h>
 #endif
 
-#include "allowlist.h"
-#include "feature.h"
-#include "klog.h" // IWYU pragma: keep
-#include "ksud.h"
-#include "kernel_compat.h"
-#include "sucompat.h"
-#include "app_profile.h"
-
 #define SU_PATH "/system/bin/su"
 #define SH_PATH "/system/bin/sh"
 
-bool ksu_su_compat_enabled __read_mostly = true;
-static bool ksu_sucompat_enabled __read_mostly = true;
-
-static int su_compat_feature_get(u64 *value)
-{
-	*value = ksu_su_compat_enabled ? 1 : 0;
-	return 0;
-}
-
-static int su_compat_feature_set(u64 value)
-{
-	bool enable = value != 0;
-
-	if (enable == ksu_su_compat_enabled) {
-		pr_info("su_compat: no need to change\n");
-	return 0;
-	}
-
-	if (enable) {
-		ksu_sucompat_enable();
-	} else {
-		ksu_sucompat_disable();
-	}
-
-	ksu_su_compat_enabled = enable;
-	pr_info("su_compat: set to %d\n", enable);
-
-	return 0;
-}
-
-static const struct ksu_feature_handler su_compat_handler = {
-	.feature_id = KSU_FEATURE_SU_COMPAT,
-	.name = "su_compat",
-	.get_handler = su_compat_feature_get,
-	.set_handler = su_compat_feature_set,
-};
+static bool ksu_su_compat_enabled __read_mostly = true;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0)
 static void __user *userspace_stack_buffer(const void *d, size_t len)
@@ -113,20 +70,17 @@ __attribute__((hot, no_stack_protector))
 static __always_inline bool is_su_allowed(const void **ptr_to_check)
 {
 	barrier();
-	if (!ksu_sucompat_enabled)
+	if (!ksu_su_compat_enabled)
 		return false;
 
-#ifdef CONFIG_SECCOMP
 	if (likely(!!current->seccomp.mode))
 		return false;
-#endif
 
 	// with seccomp check above, we can make this neutral
 	if (!ksu_is_allow_uid_for_current(current_uid().val))
 		return false;
 
 	// first check the pointer-to-pointer
-	// mark as volatile to avoid toctou issues
 	if (unlikely(!(volatile void *)ptr_to_check))
 		return false;
 
@@ -147,16 +101,19 @@ static int ksu_sucompat_user_common(const char __user **filename_user,
 	if (ksu_copy_from_user_retry(path, *filename_user, sizeof(path)))
 		return 0;
 
-	path[sizeof(path) - 1] = '\0';
+	// what we shouldve copied should've been preterminated!
+	// path[sizeof(path) - 1] = '\0';
 
 	if (memcmp(path, su, sizeof(su)))
 		return 0;
 
 	if (escalate) {
+		write_sulog('x');
 		pr_info("%s su found\n", syscall_name);
 		*filename_user = ksud_user_path();
 		escape_with_root_profile(); // escalate !!
 	} else {
+		write_sulog('$');
 		pr_info("%s su->sh!\n", syscall_name);
 		*filename_user = sh_user_path();
 	}
@@ -213,10 +170,12 @@ static int ksu_sucompat_kernel_common(void *filename_ptr, const char *function_n
 		return 0;
 
 	if (escalate) {
+		write_sulog('x');
 		pr_info("%s su found\n", function_name);
 		memcpy(filename_ptr, KSUD_PATH, sizeof(KSUD_PATH));
 		escape_with_root_profile();
 	} else {
+		write_sulog('$');
 		pr_info("%s su->sh\n", function_name);
 		memcpy(filename_ptr, SH_PATH, sizeof(SH_PATH));
 	}
@@ -240,10 +199,14 @@ int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
 	return ksu_sucompat_kernel_common((void *)(*filename_ptr)->name, "do_execveat_common", true);
 }
 
+// for compatibility to old hooks
 int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,
 			void *envp, int *flags)
 {
-	return ksu_handle_execveat_sucompat(fd, filename_ptr, argv, envp, flags);
+	if (!is_su_allowed((const void **)filename_ptr))
+		return 0;
+
+	return ksu_sucompat_kernel_common((void *)(*filename_ptr)->name, "do_execveat_common", true);
 }
 #else
 // for do_execve_common on < 3.14
@@ -256,6 +219,19 @@ int ksu_legacy_execve_sucompat(const char **filename_ptr,
 		return 0;
 
 	return ksu_sucompat_kernel_common((void *)*filename_ptr, "do_execve_common", true);
+}
+#endif
+
+// vfs_statx for 5.18+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0)
+int ksu_handle_vfs_statx(void *__never_use_dfd, struct filename **filename_ptr,
+			void *__never_use_flags, void **__never_use_stat,
+			void *__never_use_request_mask)
+{
+	if (!is_su_allowed((const void **)filename_ptr))
+		return 0;
+
+	return ksu_sucompat_kernel_common((void *)(*filename_ptr)->name, "vfs_statx", false);
 }
 #endif
 
@@ -275,23 +251,57 @@ extern void rp_sucompat_exit();
 extern void rp_sucompat_init();
 #endif
 
-void ksu_sucompat_enable()
+static void ksu_sucompat_enable()
 {
 #ifdef CONFIG_KSU_KRETPROBES_SUCOMPAT
 	rp_sucompat_init();
 #endif
-	ksu_sucompat_enabled = true;
+	ksu_su_compat_enabled = true;
 	pr_info("%s: hooks enabled: exec, faccessat, stat\n", __func__);
 }
 
-void ksu_sucompat_disable()
+static void ksu_sucompat_disable()
 {
 #ifdef CONFIG_KSU_KRETPROBES_SUCOMPAT
 	rp_sucompat_exit();
 #endif
-	ksu_sucompat_enabled = false;
+	ksu_su_compat_enabled = false;
 	pr_info("%s: hooks disabled: exec, faccessat, stat\n", __func__);
 }
+
+static int su_compat_feature_get(u64 *value)
+{
+	*value = ksu_su_compat_enabled ? 1 : 0;
+	return 0;
+}
+
+static int su_compat_feature_set(u64 value)
+{
+	bool enable = value != 0;
+
+	if (enable == ksu_su_compat_enabled) {
+		pr_info("su_compat: no need to change\n");
+	return 0;
+	}
+
+	if (enable) {
+		ksu_sucompat_enable();
+	} else {
+		ksu_sucompat_disable();
+	}
+
+	ksu_su_compat_enabled = enable;
+	pr_info("su_compat: set to %d\n", enable);
+
+	return 0;
+}
+
+static const struct ksu_feature_handler su_compat_handler = {
+	.feature_id = KSU_FEATURE_SU_COMPAT,
+	.name = "su_compat",
+	.get_handler = su_compat_feature_get,
+	.set_handler = su_compat_feature_set,
+};
 
 // sucompat: permited process can execute 'su' to gain root access.
 void ksu_sucompat_init()
@@ -299,15 +309,9 @@ void ksu_sucompat_init()
 	if (ksu_register_feature_handler(&su_compat_handler)) {
 		pr_err("Failed to register su_compat feature handler\n");
 	}
-	if (ksu_su_compat_enabled) {
-		ksu_sucompat_enable();
-	}
 }
 
 void ksu_sucompat_exit()
 {
-	if (ksu_su_compat_enabled) {
-		ksu_sucompat_disable();
-	}
 	ksu_unregister_feature_handler(KSU_FEATURE_SU_COMPAT);
 }

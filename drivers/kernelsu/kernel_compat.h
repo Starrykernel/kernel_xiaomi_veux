@@ -2,11 +2,12 @@
 #define __KSU_H_KERNEL_COMPAT
 
 #include <linux/uaccess.h>
-#include "linux/fs.h"
-#include "linux/key.h"
-#include "linux/version.h"
-#include "linux/key.h"
-#include "linux/cred.h"
+#include <linux/fs.h>
+#include <linux/key.h>
+#include <linux/version.h>
+#include <linux/key.h>
+#include <linux/syscalls.h>
+#include <linux/cred.h>
 
 extern struct file *ksu_filp_open_compat(const char *filename, int flags,
 					 umode_t mode);
@@ -38,7 +39,7 @@ __weak int close_fd(unsigned fd)
 }
 #endif
 
-extern long ksu_copy_from_user_nofault(void *dst, const void __user *src, size_t size);
+extern long copy_from_user_nofault(void *dst, const void __user *src, size_t size);
 
 /*
  * ksu_copy_from_user_retry
@@ -48,10 +49,9 @@ extern long ksu_copy_from_user_nofault(void *dst, const void __user *src, size_t
  * + hot since this is reused on sucompat
  */
 __attribute__((hot))
-static long ksu_copy_from_user_retry(void *to, 
-		const void __user *from, unsigned long count)
+static long ksu_copy_from_user_retry(void *to, const void __user *from, unsigned long count)
 {
-	long ret = ksu_copy_from_user_nofault(to, from, count);
+	long ret = copy_from_user_nofault(to, from, count);
 	if (likely(!ret))
 		return ret;
 
@@ -92,15 +92,6 @@ __weak ssize_t strscpy(char *dest, const char *src, size_t count)
 static inline struct inode *file_inode(struct file *f)
 {
 	return f->f_path.dentry->d_inode;
-}
-#endif
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0)
-__weak int anon_inode_getfd_secure(const char *name, const struct file_operations *fops,
-			    void *priv, int flags,
-			    const struct inode *context_inode)
-{
-	return anon_inode_getfd(name, fops, priv, flags);
 }
 #endif
 
