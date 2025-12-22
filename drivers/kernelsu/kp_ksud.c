@@ -7,11 +7,6 @@
 #include <linux/kthread.h>
 #include <linux/sched.h>
 
-#include "arch.h"
-#include "klog.h"
-#include "ksud.h"
-#include "kernel_compat.h"
-
 static struct task_struct *unregister_thread;
 
 // vfs_read
@@ -53,9 +48,6 @@ static struct kprobe input_event_kp = {
 
 // security_bounded_transition
 #if defined(CONFIG_KRETPROBES) && LINUX_VERSION_CODE >= KERNEL_VERSION(3, 18, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(4, 14, 0)
-#include "avc_ss.h"
-#include "selinux/selinux.h"
-
 extern u32 ksud_init_sid;
 extern u32 ksud_su_sid;
 extern int grab_transition_sids();

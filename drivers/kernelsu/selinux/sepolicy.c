@@ -3,10 +3,6 @@
 #include <linux/slab.h>
 #include <linux/version.h>
 
-#include "sepolicy.h"
-#include "../klog.h" // IWYU pragma: keep
-#include "ss/symtab.h"
-
 #define KSU_SUPPORT_ADD_TYPE
 
 /*
@@ -369,7 +365,7 @@ static void add_xperm_rule_raw(struct policydb *db, struct type_datum *src,
 		if (datum->u.xperms == NULL) {
 			datum->u.xperms =
 				(struct avtab_extended_perms *)(kzalloc(
-					sizeof(xperms), GFP_KERNEL));
+					sizeof(xperms), GFP_ATOMIC));
 			if (!datum->u.xperms) {
 				pr_err("alloc xperms failed\n");
 				return;
@@ -621,21 +617,27 @@ static bool add_genfscon(struct policydb *db, const char *fs_name,
 	return false;
 }
 
-static void *ksu_realloc(void *old, size_t new_size, size_t old_size)
+// https://github.com/torvalds/linux/commit/590b9d576caec6b4c46bba49ed36223a399c3fc5#diff-cc9aa90e094e6e0f47bd7300db4f33cf4366b98b55d8753744f31eb69c691016R844-R845
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+#define ksu_kvrealloc(p, new_size, _old_size) kvrealloc(p, new_size, GFP_ATOMIC)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)
+// https://cs.android.com/android/_/android/kernel/common/+/f5f3e54f811679761c33526e695bd296190faade
+// Some 5.10 kernel don't have this backport, so copy one.
+static void *ksu_kvrealloc_compat(const void *p, size_t oldsize, size_t newsize, gfp_t flags)
 {
-	// we can't use krealloc, because it may be read-only
-	void *new = kzalloc(new_size, GFP_ATOMIC);
-	if (!new) {
+	void *newp;
+
+	if (oldsize >= newsize)
+		return (void *)p;
+	newp = kvmalloc(newsize, flags);
+	if (!newp)
 		return NULL;
-	}
-	if (old_size) {
-		memcpy(new, old, old_size);
-	}
-	// we can't use kfree, because it may be read-only
-	// there maybe some leaks, maybe we can check ptr_write, but it's not a big deal
-	// kfree(old);
-	return new;
+	__builtin_memcpy(newp, p, oldsize); // bypass fortify_source, kasan
+	kvfree(p);
+	return newp;
 }
+#define ksu_kvrealloc(p, new_size, old_size) ksu_kvrealloc_compat(p, old_size, new_size, GFP_ATOMIC)
+#endif
 
 static bool add_type(struct policydb *db, const char *type_name, bool attr)
 {
@@ -671,7 +673,7 @@ static bool add_type(struct policydb *db, const char *type_name, bool attr)
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)
 	struct ebitmap *new_type_attr_map_array =
-		ksu_realloc(db->type_attr_map_array,
+		ksu_kvrealloc(db->type_attr_map_array,
 			    value * sizeof(struct ebitmap),
 			    (value - 1) * sizeof(struct ebitmap));
 
@@ -681,7 +683,7 @@ static bool add_type(struct policydb *db, const char *type_name, bool attr)
 	}
 
 	struct type_datum **new_type_val_to_struct =
-		ksu_realloc(db->type_val_to_struct,
+		ksu_kvrealloc(db->type_val_to_struct,
 			    sizeof(*db->type_val_to_struct) * value,
 			    sizeof(*db->type_val_to_struct) * (value - 1));
 
@@ -691,7 +693,7 @@ static bool add_type(struct policydb *db, const char *type_name, bool attr)
 	}
 
 	char **new_val_to_name_types =
-		ksu_realloc(db->sym_val_to_name[SYM_TYPES],
+		ksu_kvrealloc(db->sym_val_to_name[SYM_TYPES],
 			    sizeof(char *) * value,
 			    sizeof(char *) * (value - 1));
 	if (!new_val_to_name_types) {

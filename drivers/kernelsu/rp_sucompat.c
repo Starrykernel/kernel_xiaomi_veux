@@ -7,11 +7,6 @@
 #include <linux/slab.h>
 #include <linux/namei.h>
 
-#include "arch.h"
-#include "klog.h"
-#include "ksud.h"
-#include "kernel_compat.h"
-
 static DEFINE_MUTEX(ksu_rp_sucompat_lock);
 
 // struct filename *getname_flags(const char __user *filename, int flags, int *empty)
