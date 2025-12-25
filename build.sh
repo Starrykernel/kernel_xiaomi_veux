@@ -14,7 +14,6 @@ DEVICE_CODENAME="veux"  # Device codename (e.g., veux, garnet, etc.)
 DEVICE_NAME="Redmi Note 11E Pro/Redmi Note 11 Pro 5G/POCO X4 Pro 5G"      # Device Market name (e.g., POCO X4 PRO 5G)
 KERNEL_NAME="Starry"      # Kernel name
 KERNEL_DEFCONFIG="vendor/${DEVICE_CODENAME}-qgki_defconfig"
-FINAL_KERNEL_ZIP="${KERNEL_NAME}-[KSU]-${BUILD_STATUS}-Kernel-${DEVICE_CODENAME}-$(date '+%Y%m%d').zip"
 
 # SourceForge Upload Config
 SF_USER="takixamru"
@@ -26,8 +25,6 @@ CHANGELOG_REPO="$HOME/changelogs"     # local clone of your GitHub changelogs re
 CHANGELOG_DEVICE_DIR="${CHANGELOG_REPO}/${DEVICE_CODENAME}"
 
 # AnyKernel3 Config
-ANYKERNEL3_REPO="https://github.com/Starrykernel/AnyKernel3.git"
-ANYKERNEL3_BRANCH="veux"
 ANYKERNEL3_DIR="$PWD/AnyKernel3"
 
 BUILD_HOSTNAME=$(hostname)
@@ -72,6 +69,8 @@ done
 echo ""
 echo ">>> Selected Build Type: $BUILD_STATUS"
 echo ""
+
+FINAL_KERNEL_ZIP="${KERNEL_NAME}-[KSU]-${BUILD_STATUS}-Kernel-${DEVICE_CODENAME}-$(date '+%Y%m%d').zip"
 
 # MarkdownV2 escape function for Telegram
 escape_markdown() {
@@ -152,15 +151,6 @@ if ! [ -d "$HOME/clang" ]; then
     send_message "$(escape_markdown "⚙️ Clang not found! Cloning...")"
     if ! git clone -q https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r547379.git -b 15.0 --depth=1 --single-branch ~/clang; then
         send_message "$(escape_markdown "❌ Cloning failed! Aborting...")"
-        exit 1
-    fi
-fi
-
-# Clone AnyKernel3 if missing
-if [ ! -d "$ANYKERNEL3_DIR" ]; then
-    send_message "$(escape_markdown "📦 AnyKernel3 not found. Cloning...")"
-    if ! git clone -q --depth=1 -b "$ANYKERNEL3_BRANCH" "$ANYKERNEL3_REPO" "$ANYKERNEL3_DIR"; then
-        send_message "$(escape_markdown "❌ Failed to clone AnyKernel3. Aborting build.")"
         exit 1
     fi
 fi
