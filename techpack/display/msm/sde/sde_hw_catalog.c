@@ -4842,7 +4842,8 @@ static int _sde_hardware_pre_caps(struct sde_mdss_cfg *sde_cfg, uint32_t hw_rev)
 		sde_cfg->sui_ns_allowed = true;
 		sde_cfg->sui_misr_supported = true;
 		sde_cfg->sui_block_xin_mask = 0xC01;
-		sde_cfg->has_hdr = false;
+		sde_cfg->has_hdr = true;
+		sde_cfg->has_hdr_plus = true;
 		sde_cfg->has_sui_blendstage = true;
 		sde_cfg->vbif_disable_inner_outer_shareable = true;
 		sde_cfg->mdss_hw_block_size = 0x158;
