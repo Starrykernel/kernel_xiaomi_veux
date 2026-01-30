@@ -2932,47 +2932,22 @@ error:
 
 static int dsi_panel_parse_hdr_config(struct dsi_panel *panel)
 {
-	int rc = 0;
-	struct drm_panel_hdr_properties *hdr_prop;
-	struct dsi_parser_utils *utils = &panel->utils;
+        struct drm_panel_hdr_properties *hdr_prop;
 
-	hdr_prop = &panel->hdr_props;
-	hdr_prop->hdr_enabled = utils->read_bool(utils->data,
-		"qcom,mdss-dsi-panel-hdr-enabled");
+        hdr_prop = &panel->hdr_props;
+        hdr_prop->hdr_enabled = true;
+        hdr_prop->display_primaries[0] = 14500;
+        hdr_prop->display_primaries[1] = 15500;
+        hdr_prop->display_primaries[2] = 32000;
+        hdr_prop->display_primaries[3] = 17000;
+        hdr_prop->display_primaries[4] = 15500;
+        hdr_prop->display_primaries[5] = 30000;
+        hdr_prop->display_primaries[6] = 8000;
+        hdr_prop->display_primaries[7] = 3000;
+        hdr_prop->peak_brightness = 4200000;
+        hdr_prop->blackness_level = 3230;
 
-	if (hdr_prop->hdr_enabled) {
-		rc = utils->read_u32_array(utils->data,
-				"qcom,mdss-dsi-panel-hdr-color-primaries",
-				hdr_prop->display_primaries,
-				DISPLAY_PRIMARIES_MAX);
-		if (rc) {
-			DSI_ERR("%s:%d, Unable to read color primaries,rc:%u\n",
-					__func__, __LINE__, rc);
-			hdr_prop->hdr_enabled = false;
-			return rc;
-		}
-
-		rc = utils->read_u32(utils->data,
-			"qcom,mdss-dsi-panel-peak-brightness",
-			&(hdr_prop->peak_brightness));
-		if (rc) {
-			DSI_ERR("%s:%d, Unable to read hdr brightness, rc:%u\n",
-				__func__, __LINE__, rc);
-			hdr_prop->hdr_enabled = false;
-			return rc;
-		}
-
-		rc = utils->read_u32(utils->data,
-			"qcom,mdss-dsi-panel-blackness-level",
-			&(hdr_prop->blackness_level));
-		if (rc) {
-			DSI_ERR("%s:%d, Unable to read hdr brightness, rc:%u\n",
-				__func__, __LINE__, rc);
-			hdr_prop->hdr_enabled = false;
-			return rc;
-		}
-	}
-	return 0;
+        return 0;
 }
 
 static int dsi_panel_parse_topology(
