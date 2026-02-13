@@ -73,29 +73,6 @@ __weak int ksys_unshare(unsigned long unshare_flags)
 }
 #endif
 
-// TODO: revisit
-// https://elixir.bootlin.com/linux/v3.18.140/source/fs/proc/namespaces.c#L109
-// https://elixir.bootlin.com/linux/v3.10.108/source/fs/proc/namespaces.c#L115
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
-__weak void *ns_get_path(struct path *path, struct task_struct *task,
-			const struct proc_ns_operations *ns_ops)
-{
-	// not really a replacement rather we just feed it /proc/1/ns/mnt's struct path
-	// if it works, GOOD. if it doesn't I don't care.
-	const struct cred *saved = override_creds(ksu_cred);
-
-	int err = kern_path("/proc/1/ns/mnt", 0, path);
-	if (err) {
-		revert_creds(saved);
-		pr_warn("kern_path /proc/1/ns/mnt fail! ret: %d\n", err);
-		return err;
-	}
-
-	revert_creds(saved);
-	return NULL;
-}
-#endif
-
 // global mode , need CAP_SYS_ADMIN and CAP_SYS_CHROOT to perform setns
 static void ksu_mnt_ns_global(void)
 {
@@ -122,6 +99,7 @@ static void ksu_mnt_ns_global(void)
 		pwd_path = NULL;
 	}
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 19, 0)
 try_setns:
 
 	rcu_read_lock();
@@ -147,6 +125,26 @@ try_setns:
 		pr_warn("failed get path for init mount namespace: %ld\n", ret);
 		goto out;
 	}
+#else
+try_setns:
+	barrier(); // to shutup declaration after label
+
+	// on UL kernels we can try to just feed it with struct path of /proc/1/ns/mnt
+	// we do NOT have ns_get_path. if it works, GOOD. if it doesn't I don't care.
+
+	struct path ns_path;
+	const struct cred *saved = override_creds(ksu_cred);
+
+	// make sure to LOOKUP_FOLLOW
+	// /proc/1/ns/mnt -> 'mnt:[4026531840]'
+	long ret = kern_path("/proc/1/ns/mnt", LOOKUP_FOLLOW, &ns_path);
+	if (ret) {
+		revert_creds(saved);
+		pr_warn("kern_path /proc/1/ns/mnt fail! ret: %d\n", ret);
+		goto out;
+	}
+	revert_creds(saved);
+#endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 6, 0)
 	struct file *ns_file = dentry_open(&ns_path, O_RDONLY, ksu_cred);

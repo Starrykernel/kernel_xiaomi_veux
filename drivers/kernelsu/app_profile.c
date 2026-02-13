@@ -115,9 +115,10 @@ void disable_seccomp()
 #endif // 5.9
 }
 
-static void escape_to_root(bool is_kthread)
+static void escape_to_root(bool is_forced)
 {
 	struct cred *cred;
+	struct root_profile profile;
 
 	cred = prepare_creds();
 	if (!cred) {
@@ -125,57 +126,55 @@ static void escape_to_root(bool is_kthread)
 		return;
 	}
 
-	if (!is_kthread && cred->euid.val == 0) {
+	if (!is_forced && ksu_get_uid_t(cred->euid) == 0) {
 		pr_warn("Already root, don't escape!\n");
 		abort_creds(cred);
 		return;
 	}
 
-	struct root_profile *profile = ksu_get_root_profile(cred->uid.val);
+	ksu_get_root_profile(ksu_get_uid_t(cred->uid), &profile);
 
-	cred->uid.val = profile->uid;
-	cred->suid.val = profile->uid;
-	cred->euid.val = profile->uid;
-	cred->fsuid.val = profile->uid;
+	ksu_get_uid_t(cred->uid) = profile.uid;
+	ksu_get_uid_t(cred->suid) = profile.uid;
+	ksu_get_uid_t(cred->euid) = profile.uid;
+	ksu_get_uid_t(cred->fsuid) = profile.uid;
 
-	cred->gid.val = profile->gid;
-	cred->fsgid.val = profile->gid;
-	cred->sgid.val = profile->gid;
-	cred->egid.val = profile->gid;
+	ksu_get_uid_t(cred->gid) = profile.gid;
+	ksu_get_uid_t(cred->fsgid) = profile.gid;
+	ksu_get_uid_t(cred->sgid) = profile.gid;
+	ksu_get_uid_t(cred->egid) = profile.gid;
 	cred->securebits = 0;
 
-	BUILD_BUG_ON(sizeof(profile->capabilities.effective) !=
-		     sizeof(kernel_cap_t));
+	BUILD_BUG_ON(sizeof(profile.capabilities.effective) != sizeof(kernel_cap_t));
 
 	// setup capabilities
 	// we need CAP_DAC_READ_SEARCH becuase `/data/adb/ksud` is not accessible for non root process
 	// we add it here but don't add it to cap_inhertiable, it would be dropped automaticly after exec!
-	u64 cap_for_ksud =
-		profile->capabilities.effective | CAP_DAC_READ_SEARCH;
-	memcpy(&cred->cap_effective, &cap_for_ksud,
-	       sizeof(cred->cap_effective));
-	memcpy(&cred->cap_permitted, &profile->capabilities.effective,
-	       sizeof(cred->cap_permitted));
-	memcpy(&cred->cap_bset, &profile->capabilities.effective,
-	       sizeof(cred->cap_bset));
+	u64 cap_for_ksud = profile.capabilities.effective | CAP_DAC_READ_SEARCH;
+	memcpy(&cred->cap_effective, &cap_for_ksud, sizeof(cred->cap_effective));
+	memcpy(&cred->cap_permitted, &profile.capabilities.effective, sizeof(cred->cap_permitted));
+	memcpy(&cred->cap_bset, &profile.capabilities.effective, sizeof(cred->cap_bset));
 
-	setup_groups(profile, cred);
+	setup_groups(&profile, cred);
+	setup_selinux(profile.selinux_domain, cred);
 
 	commit_creds(cred);
 
-	if (!!!current->seccomp.mode)
-		goto setup_selinux;
-
-	disable_seccomp();
-
-setup_selinux:
-	setup_selinux(profile->selinux_domain);
+	if (!!current->seccomp.mode)
+		disable_seccomp();
 	
-	setup_mount_ns(profile->namespaces);
+	setup_mount_ns(profile.namespaces);
 }
 
 void escape_to_root_for_init(void) {
-	setup_selinux(KERNEL_SU_CONTEXT);
+	struct cred *cred = prepare_creds();
+	if (!cred) {
+        	pr_err("Failed to prepare init's creds!\n");
+        	return;
+	}
+
+	setup_selinux(KERNEL_SU_CONTEXT, cred);
+	commit_creds(cred);
 }
 
 void escape_with_root_profile(void)
@@ -183,9 +182,10 @@ void escape_with_root_profile(void)
 	escape_to_root(false);
 }
 
-void kthread_escape(void)
+void escape_to_root_forced(void)
 {
 	// I'm not really sure which permissions are needed
-	// so lets go with this for now
+	// its just escape to root but bypasses cred check
+	// which we likely already have on contexts where this will be used.
 	escape_to_root(true);
 }

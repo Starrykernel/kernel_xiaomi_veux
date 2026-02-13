@@ -9,123 +9,145 @@
 
 static struct task_struct *unregister_thread;
 
-// vfs_read
-extern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr,
-			size_t *count_ptr, loff_t **pos);
+// sys_newfstat rp
+// upstream: https://github.com/tiann/KernelSU/commit/df640917d11dd0eff1b34ea53ec3c0dc49667002
 
-static int vfs_read_handler_pre(struct kprobe *p, struct pt_regs *regs)
+// this is a bit different from copy_from_user_retry
+// here we just disable preempt and try nofault again
+// we use this inside context that can't sleep
+static long ksu_copy_from_user_nofault_retry(void *to, const void __user *from, unsigned long count)
 {
-	struct file **file_ptr = (struct file **)&PT_REGS_PARM1(regs);
-	char __user **buf_ptr = (char **)&PT_REGS_PARM2(regs);
-	size_t *count_ptr = (size_t *)&PT_REGS_PARM3(regs);
-	loff_t **pos_ptr = (loff_t **)&PT_REGS_CCALL_PARM4(regs);
+	long ret = copy_from_user_nofault(to, from, count);
+	if (likely(!ret))
+		return ret;
 
-	return ksu_handle_vfs_read(file_ptr, buf_ptr, count_ptr, pos_ptr);
+	preempt_disable();
+	ret = copy_from_user_nofault(to, from, count);
+	preempt_enable();
+
+	return ret;
 }
 
-static struct kprobe vfs_read_kp = {
-	.symbol_name = "vfs_read",
-	.pre_handler = vfs_read_handler_pre,
-};
-
-// input_event
-extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);
-
-static int input_handle_event_handler_pre(struct kprobe *p, struct pt_regs *regs)
+static int sys_newfstat_handler_pre(struct kretprobe_instance *p, struct pt_regs *regs)
 {
-	unsigned int *type = (unsigned int *)&PT_REGS_PARM2(regs);
-	unsigned int *code = (unsigned int *)&PT_REGS_PARM3(regs);
-	int *value = (int *)&PT_REGS_CCALL_PARM4(regs);
+	struct pt_regs *real_regs = PT_REAL_REGS(regs);
+	unsigned int fd = PT_REGS_PARM1(real_regs);
+	void *statbuf = PT_REGS_PARM2(real_regs);
+	*(void **)&p->data = NULL;
 
-	return ksu_handle_input_handle_event(type, code, value);
-
-};
-
-static struct kprobe input_event_kp = {
-	.symbol_name = "input_event",
-	.pre_handler = input_handle_event_handler_pre,
-};
-
-// security_bounded_transition
-#if defined(CONFIG_KRETPROBES) && LINUX_VERSION_CODE >= KERNEL_VERSION(3, 18, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(4, 14, 0)
-extern u32 ksud_init_sid;
-extern u32 ksud_su_sid;
-extern int grab_transition_sids();
-
-// int security_bounded_transition(u32 old_sid, u32 new_sid)
-static int bounded_transition_entry_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
-{
-	// grab sids on entry
-	u32 *sid = (u32 *)ri->data;
-	sid[0] = PT_REGS_PARM1(regs);  // old_sid
-	sid[1] = PT_REGS_PARM2(regs);  // new_sid
-	return 0;
-}
-
-static int bounded_transition_ret_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
-{
-	u32 *sid = (u32 *)ri->data;
-	u32 old_sid = sid[0];
-	u32 new_sid = sid[1];
-
-	if (!ss_initialized)
+	if (!is_init(get_current_cred()))
 		return 0;
 
-	// so if old sid is 'init' and trying to transition to a new sid of 'su'
-	// force the function to return 0 
-	if (old_sid == ksud_init_sid && new_sid == ksud_su_sid) {
-		pr_info("kp_ksud: security_bounded_transition: allowing init (%d) -> su (%d)\n", ksud_init_sid, ksud_su_sid);
-		PT_REGS_RC(regs) = 0;  // make the original func return 0
+	struct file *file = fget(fd);
+	if (!file)
+		return 0;
+
+	if (is_init_rc(file)) {
+		pr_info("kp_ksud: newfstat: stat init.rc \n");
+		fput(file);
+		*(void **)&p->data = statbuf;
+		return 0;
 	}
+	fput(file);
 
 	return 0;
 }
 
-static struct kretprobe bounded_transition_rp = {
-	.kp.symbol_name = "security_bounded_transition",
-	.handler = bounded_transition_ret_handler,
-	.entry_handler = bounded_transition_entry_handler,
-	.data_size = sizeof(u32) * 2, // need to keep 2x u32's, one per sid
-	.maxactive = 20,
+static int sys_newfstat_handler_post(struct kretprobe_instance *p, struct pt_regs *regs)
+{
+	void __user *statbuf = *(void **)&p->data;
+	if (!statbuf)
+		return 0;
+
+	void __user *st_size_ptr = statbuf + offsetof(struct stat, st_size);
+	long size, new_size;
+
+	if (ksu_copy_from_user_nofault_retry(&size, st_size_ptr, sizeof(long))) {
+		pr_info("kp_ksud: newfstat: read statbuf 0x%lx failed \n", (unsigned long)st_size_ptr);
+		return 0;
+	}
+
+	new_size = size + ksu_rc_len;
+	pr_info("kp_ksud: newfstat: adding ksu_rc_len: %ld -> %ld \n", size, new_size);
+
+	// I do NOT think this matters much for now, we can use copy_to_user
+	// if SHTF then we backport cope_to_user_nofault
+	if (!copy_to_user(st_size_ptr, &new_size, sizeof(long)))
+		pr_info("kp_ksud: newfstat: added ksu_rc_len \n");
+	else
+		pr_info("kp_ksud: newfstat: add ksu_rc_len failed: statbuf 0x%lx \n", (unsigned long)st_size_ptr);
+
+	return 0;
+}
+
+static struct kretprobe sys_newfstat_rp = {
+	.kp.symbol_name = SYS_NEWFSTAT_SYMBOL,
+	.entry_handler = sys_newfstat_handler_pre,
+	.handler = sys_newfstat_handler_post,
+	.data_size = sizeof(void *),
 };
 
-static struct task_struct *unregister_rp_thread;
-
-static int rp_ksud_transition_unregister()
+#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
+static int sys_fstat64_handler_pre(struct kretprobe_instance *p, struct pt_regs *regs)
 {
-	unregister_kretprobe(&bounded_transition_rp);
-	pr_info("kp_ksud: unregister rp: security_bounded_transition\n");
-	
-	unregister_rp_thread = NULL;
+	struct pt_regs *real_regs = PT_REAL_REGS(regs);
+	unsigned long fd = PT_REGS_PARM1(real_regs); // long, but I don't think it matters.
+	void *statbuf = PT_REGS_PARM2(real_regs);
+	*(void **)&p->data = NULL;
+
+	if (!is_init(get_current_cred()))
+		return 0;
+
+	struct file *file = fget(fd);
+	if (!file)
+		return 0;
+
+	if (is_init_rc(file)) {
+		pr_info("kp_ksud: fstat64: stat init.rc \n");
+		fput(file);
+		*(void **)&p->data = statbuf;
+		return 0;
+	}
+	fput(file);
+
 	return 0;
 }
 
-void kp_ksud_transition_routine_end()
+static int sys_fstat64_handler_post(struct kretprobe_instance *p, struct pt_regs *regs)
 {
-	unregister_rp_thread = kthread_run(rp_ksud_transition_unregister, NULL, "rp_unregister");
-	if (IS_ERR(unregister_rp_thread)) {
-		unregister_rp_thread = NULL;
-		return;
+	void __user *statbuf = *(void **)&p->data;
+	if (!statbuf)
+		return 0;
+
+	// compat_stat
+	void __user *st_size_ptr = statbuf + offsetof(struct stat64, st_size);
+	long size, new_size;
+
+	if (ksu_copy_from_user_nofault_retry(&size, st_size_ptr, sizeof(long long))) {
+		pr_info("kp_ksud: fstat64: read statbuf 0x%lx failed \n", (unsigned long)st_size_ptr);
+		return 0;
 	}
+
+	new_size = size + ksu_rc_len;
+	pr_info("kp_ksud: fstat64: adding ksu_rc_len: %ld -> %ld \n", size, new_size);
+
+	if (!copy_to_user(st_size_ptr, &new_size, sizeof(long)))
+		pr_info("kp_ksud: fstat64: added ksu_rc_len \n");
+	else
+		pr_info("kp_ksud: fstat64: add ksu_rc_len failed: statbuf 0x%lx \n", (unsigned long)st_size_ptr);
+
+	return 0;
 }
 
-void kp_ksud_transition_routine_start()
-{
-	// we only need to run this once.
-	// once we got sids, we are ready
-	if (ksud_su_sid != 0)
-		return;
+static struct kretprobe sys_fstat64_rp = {
+	.kp.symbol_name = SYS_FSTAT64_SYMBOL,
+	.entry_handler = sys_fstat64_handler_pre,
+	.handler = sys_fstat64_handler_post,
+	.data_size = sizeof(void *),
+};
+#endif
 
-	// grab sids outside of kretprobe context
-	int ret = grab_transition_sids();
-	if (ret)
-		return;
-	
-	ret = register_kretprobe(&bounded_transition_rp);
-	pr_info("kp_ksud: register rp: security_bounded_transition ret: %d\n", ret);
-}
-#endif // security_bounded_transition
-
+#ifndef CONFIG_KSU_TAMPER_SYSCALL_TABLE
 // sys_reboot
 extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);
 
@@ -144,31 +166,33 @@ static struct kprobe sys_reboot_kp = {
 	.symbol_name = SYS_REBOOT_SYMBOL,
 	.pre_handler = sys_reboot_handler_pre,
 };
-
-static void unregister_kprobe_logged(struct kprobe *kp)
-{
-	const char *symbol_name = kp->symbol_name;
-	if (!kp->addr) {
-		pr_info("kp_ksud: kp: %s not registered in the first place!\n", symbol_name);
-		return;
-	}
-	unregister_kprobe(kp); // this fucking shit has no return code
-	pr_info("kp_ksud: unregister kp: %s ret: ??\n", symbol_name);
-}
+#endif
 
 static int unregister_kprobe_function(void *data)
 {
-	//pr_info("kp_ksud: unregistering kprobes...\n");
+loop_start:
 
-	unregister_kprobe_logged(&input_event_kp);
-	unregister_kprobe_logged(&vfs_read_kp);
-	
+	msleep(1000);
+
+	if ((volatile bool)ksu_execveat_hook)
+		goto loop_start;
+
+	pr_info("kp_ksud: unregistering kprobes...\n");
+
+	unregister_kretprobe(&sys_newfstat_rp);
+	pr_info("kp_ksud: unregister sys_newfstat_rp!\n");
+
+#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
+	unregister_kretprobe(&sys_fstat64_rp);
+	pr_info("kp_ksud: unregister sys_fstat64_rp!\n");
+#endif
+
 	unregister_thread = NULL;
-	
+
 	return 0;
 }
 
-void unregister_kprobe_thread()
+static void unregister_kprobe_thread()
 {
 	unregister_thread = kthread_run(unregister_kprobe_function, NULL, "kprobe_unregister");
 	if (IS_ERR(unregister_thread)) {
@@ -177,18 +201,21 @@ void unregister_kprobe_thread()
 	}
 }
 
-static void register_kprobe_logged(struct kprobe *kp)
+static void kp_ksud_init()
 {
-	int ret = register_kprobe(kp);
-	pr_info("kp_ksud: register kp: %s ret: %d\n", kp->symbol_name, ret);
 
-}
+#ifndef CONFIG_KSU_TAMPER_SYSCALL_TABLE
+	int ret = register_kprobe(&sys_reboot_kp); // dont unreg this one
+	pr_info("kp_ksud: sys_reboot_kp: %d\n", ret);
+#endif
 
-void kp_ksud_init()
-{
-	// dont unreg this one
-	register_kprobe_logged(&sys_reboot_kp);
+	int ret2 = register_kretprobe(&sys_newfstat_rp);
+	pr_info("kp_ksud: sys_newfstat_rp: %d\n", ret2);
 
-	register_kprobe_logged(&vfs_read_kp);
-	register_kprobe_logged(&input_event_kp);
+#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
+	int ret3 = register_kretprobe(&sys_fstat64_rp);
+	pr_info("kp_ksud: sys_fstat64_rp: %d\n", ret3);
+#endif
+
+	unregister_kprobe_thread();
 }

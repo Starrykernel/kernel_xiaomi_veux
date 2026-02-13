@@ -15,11 +15,6 @@
 #include <linux/sched.h>
 #include <linux/stddef.h>
 #include <linux/binfmts.h>
-
-#ifdef CONFIG_KSU_LSM_SECURITY_HOOKS
-#include <linux/lsm_hooks.h>
-#endif
-
 #include <linux/nsproxy.h>
 #include <linux/path.h>
 #include <linux/printk.h>
@@ -39,7 +34,6 @@
 #endif
 
 static bool ksu_kernel_umount_enabled = true;
-static bool ksu_enhanced_security_enabled = false;
 
 static int kernel_umount_feature_get(u64 *value)
 {
@@ -62,27 +56,6 @@ static const struct ksu_feature_handler kernel_umount_handler = {
 	.set_handler = kernel_umount_feature_set,
 };
 
-static int enhanced_security_feature_get(u64 *value)
-{
-	*value = ksu_enhanced_security_enabled ? 1 : 0;
-	return 0;
-}
-
-static int enhanced_security_feature_set(u64 value)
-{
-	bool enable = value != 0;
-	ksu_enhanced_security_enabled = enable;
-	pr_info("enhanced_security: set to %d\n", enable);
-	return 0;
-}
-
-static const struct ksu_feature_handler enhanced_security_handler = {
-	.feature_id = KSU_FEATURE_ENHANCED_SECURITY,
-	.name = "enhanced_security",
-	.get_handler = enhanced_security_feature_get,
-	.set_handler = enhanced_security_feature_set,
-};
-
 LSM_HANDLER_TYPE ksu_handle_rename(struct dentry *old_dentry, struct dentry *new_dentry)
 {
 	if (!current->mm) {
@@ -90,7 +63,8 @@ LSM_HANDLER_TYPE ksu_handle_rename(struct dentry *old_dentry, struct dentry *new
 		return 0;
 	}
 
-	if (current_uid().val != 1000) {
+	kuid_t current_uid = current_uid();
+	if (ksu_get_uid_t(current_uid) != 1000) {
 		// skip non system uid
 		return 0;
 	}
@@ -122,38 +96,49 @@ LSM_HANDLER_TYPE ksu_handle_rename(struct dentry *old_dentry, struct dentry *new
 	return 0;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0) || defined(KSU_HAS_PATH_UMOUNT)
-static inline void ksu_umount_mnt(const char *mnt, struct path *path, int flags)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)
+__weak int path_umount(struct path *path, int flags)
+{
+	char buf[256] = {0};
+	int ret;
+
+	// -1 on the size as implicit null termination
+	// as we zero init the thing
+	char *usermnt = d_path(path, buf, sizeof(buf) - 1);
+	if (!(usermnt && usermnt != buf)) {
+		ret = -ENOENT;
+		goto out;
+	}
+
+	mm_segment_t old_fs = get_fs();
+	set_fs(KERNEL_DS);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)
+	ret = ksys_umount((char __user *)usermnt, flags);
+#else
+	ret = (int)sys_umount((char __user *)usermnt, flags);
+#endif
+
+	set_fs(old_fs);
+
+	// release ref here! user_path_at increases it
+	// then only cleans for itself
+out:
+	path_put(path); 
+	return ret;
+}
+#endif
+
+static void ksu_umount_mnt(const char *mnt, struct path *path, int flags)
 {
 	int err = path_umount(path, flags);
 
 	// upstream actually has a UAF here: path->dentry after dput
 	// but its fine as umount always succeeds
 	// that code path is very cold
-
-	pr_info("path_umount: %s code: %d\n", mnt, err);
+	if (err)
+		pr_info("umount %s failed: %d\n", mnt, err);
 }
-#else
-static inline void ksu_umount_mnt(const char *mnt, struct path *path, int flags)
-{
-	mm_segment_t old_fs = get_fs();
-	set_fs(KERNEL_DS); // to allow access to kernel's data segment
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)
-	int ret = ksys_umount((char __user *)mnt, flags);
-#else
-	long ret = sys_umount((char __user *)mnt, flags); // cuz asmlinkage long sys##name
-#endif
-
-	set_fs(old_fs);
-	
-	pr_info("sys_umount: %s code: %d \n", mnt, ret);
-
-	// release ref here! user_path_at increases it
-	// then only cleans for itself
-	path_put(path);
-}
-#endif // KSU_HAS_PATH_UMOUNT
 
 static void try_umount(const char *mnt, int flags)
 {
@@ -172,52 +157,22 @@ static void try_umount(const char *mnt, int flags)
 	ksu_umount_mnt(mnt, &path, flags);
 }
 
-static inline void ksu_force_sig(int sig)
-{
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 3, 0) 
-	force_sig(sig);
-#else
-	force_sig(sig, current);
-#endif
-}
-
 LSM_HANDLER_TYPE ksu_handle_setuid(struct cred *new, const struct cred *old)
 {
 	if (!new || !old) {
 		return 0;
 	}
 
-	uid_t new_uid = new->uid.val;
-	uid_t old_uid = old->uid.val;
-	uid_t new_euid = new->euid.val;
-	uid_t old_euid = old->euid.val;
+	uid_t new_uid = ksu_get_uid_t(new->uid);
+	uid_t old_uid = ksu_get_uid_t(old->uid);
 
-	if (0 != old_uid && ksu_enhanced_security_enabled) {
-		// disallow any non-ksu domain escalation from non-root to root!
-		if (unlikely(new_euid) == 0 && !is_ksu_domain()) {
-			pr_warn("find suspicious EoP: %d %s, from %d to %d\n", current->pid, current->comm, old_uid, new_uid);
-			ksu_force_sig(SIGKILL);
-			return 0;
-		}
-		// disallow appuid decrease to any other uid if it is not allowed to su
-		if (is_appuid(old_uid)) {
-			if (new_euid < old_euid && !ksu_is_allow_uid_for_current(old_uid)) {
-				pr_warn("find suspicious EoP: %d %s, from %d to %d\n", current->pid, current->comm, old_euid, new_euid);
-				ksu_force_sig(SIGKILL);
-				return 0;
-			}
-		}
-
-		return 0;
-	}
-	
 	// old process is not root, ignore it.
 	if (0 != old_uid)
 		return 0;
 
 	// we dont have those new fancy things upstream has
 	// lets just do original thing where we disable seccomp
-	if (ksu_get_manager_appid() == new_uid % PER_USER_RANGE) {
+	if (likely(ksu_is_manager_appid_valid()) && unlikely(ksu_get_manager_appid() == new_uid % PER_USER_RANGE)) {
 		disable_seccomp();
 		pr_info("install fd for: %d\n", new_uid);
 		ksu_install_fd(); // install fd for ksu manager
@@ -284,7 +239,7 @@ LSM_HANDLER_TYPE ksu_handle_setuid(struct cred *new, const struct cred *old)
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 2, 0)
-extern void ksu_grab_init_session_keyring(const char *filename);
+static void ksu_grab_init_session_keyring(const char *filename);
 #endif
 
 LSM_HANDLER_TYPE ksu_bprm_check(struct linux_binprm *bprm)
@@ -301,15 +256,18 @@ LSM_HANDLER_TYPE ksu_bprm_check(struct linux_binprm *bprm)
 	return 0;
 }
 
-// dummy
-#ifndef CONFIG_KSU_LSM_SECURITY_HOOKS
-#include <linux/key.h>
-int ksu_key_permission(key_ref_t key_ref, const struct cred *cred,
-			      unsigned perm)
+bool ksu_vfs_read_hook __read_mostly;
+static void ksu_handle_initrc(struct file *file);
+
+LSM_HANDLER_TYPE ksu_file_permission(struct file *file, int mask)
 {
+	if (!ksu_vfs_read_hook)
+		return 0;
+
+	ksu_handle_initrc(file);
+
 	return 0;
 }
-#endif
 
 #ifdef CONFIG_KSU_LSM_SECURITY_HOOKS
 static int ksu_inode_rename(struct inode *old_inode, struct dentry *old_dentry,
@@ -324,32 +282,171 @@ static int ksu_task_fix_setuid(struct cred *new, const struct cred *old,
 	return ksu_handle_setuid(new, old);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0)
+#include <linux/lsm_hooks.h>
 static struct security_hook_list ksu_hooks[] = {
 	LSM_HOOK_INIT(inode_rename, ksu_inode_rename),
 	LSM_HOOK_INIT(task_fix_setuid, ksu_task_fix_setuid),
 	LSM_HOOK_INIT(bprm_check_security, ksu_bprm_check),
+	LSM_HOOK_INIT(file_permission, ksu_file_permission),
 };
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+static void ksu_lsm_hook_init(void)
+{
+	security_add_hooks(ksu_hooks, ARRAY_SIZE(ksu_hooks), "ksu");
+}
+
+#else
+static void ksu_lsm_hook_init(void)
+{
+	security_add_hooks(ksu_hooks, ARRAY_SIZE(ksu_hooks));
+}
+#endif //  < 4.11
+
+#else // 4.2
+
+// selinux_ops (LSM), security_operations struct tampering for ultra legacy
+
+extern struct security_operations selinux_ops;
+
+static int (*orig_inode_rename) (struct inode *old_dir, struct dentry *old_dentry,
+			     struct inode *new_dir, struct dentry *new_dentry);
+static int hook_inode_rename(struct inode *old_inode, struct dentry *old_dentry,
+			    struct inode *new_inode, struct dentry *new_dentry)
+{
+	ksu_inode_rename(old_inode, old_dentry, new_inode, new_dentry);
+	return orig_inode_rename(old_inode, old_dentry, new_inode, new_dentry);
+}
+
+static int (*orig_task_fix_setuid) (struct cred *new, const struct cred *old, int flags);
+static int hook_task_fix_setuid(struct cred *new, const struct cred *old, int flags)
+{
+	ksu_task_fix_setuid(new, old, flags);
+	return orig_task_fix_setuid(new, old, flags);
+}
+
+static int (*orig_bprm_check_security)(struct linux_binprm *bprm);
+static int hook_bprm_check_security(struct linux_binprm *bprm)
+{
+	ksu_bprm_check(bprm);
+	return orig_bprm_check_security(bprm);
+}
+
+static int (*orig_file_permission) (struct file *file, int mask);
+static int hook_file_permission(struct file *file, int mask)
+{
+
+	ksu_file_permission(file, mask);
+	return orig_file_permission(file, mask);
+}
+
+static void ksu_lsm_hook_restore(void)
+{
+	struct security_operations *ops = (struct security_operations *)&selinux_ops;
+
+	if (!ops)
+		return;
+
+	if (!!strcmp((char *)ops, "selinux"))
+		return;
+
+	// TODO: maybe hunt for this in memory instead of exporting
+	// this is the first member of the struct so it points to the struct
+	pr_info("%s: selinux_ops: 0x%lx .name = %s\n", __func__, (long)ops, (const char *)ops );
+
+	preempt_disable();
+
+	if (orig_bprm_check_security) {
+		pr_info("%s: restoring: 0x%lx to 0x%lx\n", __func__, (long)ops->bprm_check_security, (long)orig_bprm_check_security);
+		ops->bprm_check_security = orig_bprm_check_security;
+	}
+
+	if (orig_file_permission) {
+		pr_info("%s: restoring: 0x%lx to 0x%lx\n", __func__, (long)ops->file_permission, (long)orig_file_permission);
+		ops->file_permission = orig_file_permission;
+	}
+
+	preempt_enable();
+	
+	smp_mb();
+	return;
+}
+
+static struct task_struct *unhook_thread;
+
+static int execveat_hook_wait_fn(void *data)
+{
+loop_start:
+
+	msleep(1000);
+
+	if ((volatile bool)ksu_execveat_hook)
+		goto loop_start;
+
+	ksu_lsm_hook_restore();
+
+	return 0;
+}
+
+static void execveat_hook_wait_thread()
+{
+	unhook_thread = kthread_run(execveat_hook_wait_fn, NULL, "unhook");
+	if (IS_ERR(unhook_thread)) {
+		unhook_thread = NULL;
+		return;
+	}
+}
+
+static void ksu_lsm_hook_init(void)
+{
+	struct security_operations *ops = (struct security_operations *)&selinux_ops;
+
+	if (!ops)
+		return;
+
+	if (!!strcmp((char *)ops, "selinux"))
+		return;
+
+	// TODO: maybe hunt for this in memory instead of exporting
+	// this is the first member of the struct so it points to the struct
+	pr_info("%s: selinux_ops: 0x%lx .name = %s\n", __func__, (long)ops, (const char *)ops );
+
+	preempt_disable();
+
+	orig_inode_rename = ops->inode_rename;
+	ops->inode_rename = hook_inode_rename;
+
+	orig_task_fix_setuid = ops->task_fix_setuid;
+	ops->task_fix_setuid = hook_task_fix_setuid;
+
+	orig_bprm_check_security = ops->bprm_check_security;
+	ops->bprm_check_security = hook_bprm_check_security;
+
+	orig_file_permission = ops->file_permission;
+	ops->file_permission = hook_file_permission;
+
+	preempt_enable();
+	
+	smp_mb();
+
+	execveat_hook_wait_thread();
+	return;
+}
+
+#endif // < 4.2
+
+#else
 void __init ksu_lsm_hook_init(void)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-	security_add_hooks(ksu_hooks, ARRAY_SIZE(ksu_hooks), "ksu");
-#else
-	// https://elixir.bootlin.com/linux/v4.10.17/source/include/linux/lsm_hooks.h#L1892
-	security_add_hooks(ksu_hooks, ARRAY_SIZE(ksu_hooks));
-#endif
+	// nothing, no-op
 }
-#else
-void __init ksu_lsm_hook_init(void) {}
-#endif //CONFIG_KSU_LSM_SECURITY_HOOKS
+#endif // CONFIG_KSU_LSM_SECURITY_HOOKS
 
 void __init ksu_core_init(void)
 {
 	ksu_lsm_hook_init();
 	if (ksu_register_feature_handler(&kernel_umount_handler)) {
 		pr_err("Failed to register kernel_umount feature handler\n");
-	}
-	if (ksu_register_feature_handler(&enhanced_security_handler)) {
-		pr_err("Failed to register enhanced security feature handler\n");
 	}
 }

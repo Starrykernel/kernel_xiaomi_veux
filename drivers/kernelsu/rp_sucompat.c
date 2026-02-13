@@ -88,13 +88,13 @@ static void destroy_kretprobe(struct kretprobe **rp_ptr)
 	*rp_ptr = NULL;
 }
 
-void rp_sucompat_exit()
+static void rp_sucompat_exit()
 {
 	pr_info("rp_sucompat: unregister getname_flags!\n");
 	destroy_kretprobe(&getname_rp);
 }
 
-void rp_sucompat_init()
+static void rp_sucompat_init()
 {
 	pr_info("%s: register getname_flags!\n", __func__);
 	getname_rp = init_kretprobe("getname_flags", getname_flags_entry_handler,

@@ -37,7 +37,7 @@ static inline int install_session_keyring(struct key *keyring)
 
 // this is on tgcred on < 3.8
 // while we can grab that one, it seems to not actually be needed 
-void ksu_grab_init_session_keyring(const char *filename)
+static void ksu_grab_init_session_keyring(const char *filename)
 {
 	if (init_session_keyring)
 		return;
@@ -64,49 +64,48 @@ void ksu_grab_init_session_keyring(const char *filename)
 	pr_info("%s: init_session_keyring: 0x%p \n", __func__, init_session_keyring);
 
 }
-#endif
-
 struct file *ksu_filp_open_compat(const char *filename, int flags, umode_t mode)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 2, 0)
 	// normally we only put this on ((current->flags & PF_WQ_WORKER) || (current->flags & PF_KTHREAD))
 	// but in the grand scale of things, this does NOT matter.
+	// pr_info("installing init session keyring for older kernel\n");
 	if (init_session_keyring != NULL && !current_cred()->session_keyring) {
-		// pr_info("installing init session keyring for older kernel\n");
 		install_session_keyring(init_session_keyring);
 	}
-#endif
-	struct file *fp = filp_open(filename, flags, mode);
-	return fp;
+	return filp_open(filename, flags, mode);
 }
-
-ssize_t ksu_kernel_read_compat(struct file *p, void *buf, size_t count,
-			       loff_t *pos)
+#else
+struct file *ksu_filp_open_compat(const char *filename, int flags, umode_t mode)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0) || defined(KSU_NEW_KERNEL_READ)
+	return filp_open(filename, flags, mode);
+}
+#endif
+
+ssize_t ksu_kernel_read_compat(struct file *p, void *buf, size_t count, loff_t *pos)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)
 	return kernel_read(p, buf, count, pos);
-#else
-	loff_t offset = pos ? *pos : 0;
-	ssize_t result = kernel_read(p, offset, (char *)buf, count);
-	if (pos && result > 0) {
-		*pos = offset + result;
-	}
+#else // https://elixir.bootlin.com/linux/v4.14.336/source/fs/read_write.c#L418
+	mm_segment_t old_fs;
+	old_fs = get_fs();
+	set_fs(get_ds());
+	ssize_t result = vfs_read(p, (void __user *)buf, count, pos);
+	set_fs(old_fs);
 	return result;
 #endif
 }
 
-ssize_t ksu_kernel_write_compat(struct file *p, const void *buf, size_t count,
-				loff_t *pos)
+ssize_t ksu_kernel_write_compat(struct file *p, const void *buf, size_t count, loff_t *pos)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0) || defined(KSU_NEW_KERNEL_WRITE)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)
 	return kernel_write(p, buf, count, pos);
-#else
-	loff_t offset = pos ? *pos : 0;
-	ssize_t result = kernel_write(p, buf, count, offset);
-	if (pos && result > 0) {
-		*pos = offset + result;
-	}
-	return result;
+#else // https://elixir.bootlin.com/linux/v4.14.336/source/fs/read_write.c#L512
+	mm_segment_t old_fs;
+	old_fs = get_fs();
+	set_fs(get_ds());
+	ssize_t res = vfs_write(p, (__force const char __user *)buf, count, pos);
+	set_fs(old_fs);
+	return res;
 #endif
 }
 
@@ -131,29 +130,22 @@ __weak int path_mount(const char *dev_name, struct path *path,
 }
 #endif
 
-static inline int ksu_access_ok(const void *addr, unsigned long size)
-{
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
-	return access_ok(addr, size);
-#else
-	return access_ok(VERIFY_READ, addr, size);
-#endif
-}
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 3, 0)
-__weak long probe_user_read(void *dst, const void __user *src, size_t size)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0) 
+__weak long copy_from_user_nofault(void *dst, const void __user *src, size_t size)
 {
 	// https://elixir.bootlin.com/linux/v5.8/source/mm/maccess.c#L205
 	long ret = -EFAULT;
 	mm_segment_t old_fs = get_fs();
 
 	set_fs(USER_DS);
-	// tweaked to use ksu_access_ok
-	if (ksu_access_ok(src, size)) {
-		pagefault_disable();
-		ret = __copy_from_user_inatomic(dst, src, size);
-		pagefault_enable();
-	}
+
+	// normally theres an access_ok check here
+	// but for what we use it, it will always be true.
+
+	pagefault_disable();
+	ret = __copy_from_user_inatomic(dst, src, size);
+	pagefault_enable();
+
 	set_fs(old_fs);
 
 	if (ret)
@@ -162,9 +154,20 @@ __weak long probe_user_read(void *dst, const void __user *src, size_t size)
 }
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0) 
-__weak long copy_from_user_nofault(void *dst, const void __user *src, size_t size)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+__weak long copy_from_kernel_nofault(void *dst, const void *src, size_t size)
 {
-	return probe_user_read(dst, src, size);
+	// https://elixir.bootlin.com/linux/v5.2.21/source/mm/maccess.c#L27
+	long ret;
+	mm_segment_t old_fs = get_fs();
+
+	set_fs(KERNEL_DS);
+	pagefault_disable();
+	ret = __copy_from_user_inatomic(dst,
+			(__force const void __user *)src, size);
+	pagefault_enable();
+	set_fs(old_fs);
+
+	return ret ? -EFAULT : 0;
 }
 #endif
